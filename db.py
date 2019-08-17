@@ -4,13 +4,13 @@ from types import FunctionType
 from datetime import datetime
 from functools import partial
 from itertools import repeat
-from statistics import mean
+from statistics import mean, StatisticsError
 from collections import UserDict, namedtuple
 
 from pymongo import MongoClient, ASCENDING, DESCENDING
 from bson.objectid import ObjectId
 
-from utils import attr_or_key_getter
+from utils import attr_or_key_getter, first_or_none
 
 
 FScore = namedtuple('FScore', ['total_issued_stock', 'profitable', 'cfo'])
@@ -40,6 +40,13 @@ available_rank_options = [
     RankOption(key='rank_per', title='PER', asc=True, is_rankoption=True),
     RankOption(key='rank_last_year_gpa', title='GPA', asc=False, is_rankoption=True),
     RankOption(key='rank_dividend', title='배당', asc=False, is_rankoption=True),
+    RankOption(key='rank_beta', title='저베타', asc=True, is_rankoption=True),
+    RankOption(key='rank_month1', title='1개월', asc=False, is_rankoption=True),
+    RankOption(key='rank_month3', title='3개월', asc=False, is_rankoption=True),
+    RankOption(key='rank_month6', title='6개월', asc=False, is_rankoption=True),
+    RankOption(key='rank_month12', title='12개월', asc=False, is_rankoption=True),
+    RankOption(key='rank_relative_earning_rate', title='상대수익률', asc=False, is_rankoption=True),
+    RankOption(key='rank_roic', title='ROIC', asc=False, is_rankoption=True),
 ]
 
 
@@ -51,13 +58,26 @@ available_filter_options = [
     FilterOption(key='expected_rate_by_low_pbr', title='저P기대수익률', morethan=None, value=None, is_boolean=False),
     FilterOption(key='pbr', title='PBR', morethan=None, value=None, is_boolean=False),
     FilterOption(key='per', title='PER', morethan=None, value=None, is_boolean=False),
+    FilterOption(key='last_year_pcr', title='PCR', morethan=None, value=None, is_boolean=False),
+    FilterOption(key='last_year_psr', title='PSR', morethan=None, value=None, is_boolean=False),
     FilterOption(key='dividend_rate', title='배당률', morethan=None, value=None, is_boolean=False),
+    FilterOption(key='beta', title='베타', morethan=None, value=None, is_boolean=False),
+    FilterOption(key='foreigner_weight', title='외국인비중', morethan=None, value=None, is_boolean=False),
+    FilterOption(key='floating_rate', title='유동주식비율', morethan=None, value=None, is_boolean=False),
+    FilterOption(key='month1', title='1개월수익률', morethan=None, value=None, is_boolean=False),
+    FilterOption(key='month3', title='3개월수익률', morethan=None, value=None, is_boolean=False),
+    FilterOption(key='month6', title='6개월수익률', morethan=None, value=None, is_boolean=False),
+    FilterOption(key='month12', title='12개월수익률', morethan=None, value=None, is_boolean=False),
+    FilterOption(key='relative_earning_rate', title='상대수익률', morethan=None, value=None, is_boolean=False),
     FilterOption(key='countable_last_four_years_roes_count', title='계산가능ROE수', morethan=None, value=None, is_boolean=False),
     FilterOption(key='roe_max_diff', title='ROE최대최소차', morethan=None, value=None, is_boolean=False),
     FilterOption(key='last_four_years_roe_max_diff', title='최근4년ROE최대최소차', morethan=None, value=None, is_boolean=False),
     FilterOption(key='calculable_pbr_count', title='계산가능PBR수', morethan=None, value=None, is_boolean=False),
+    FilterOption(key='FCF_surplus_years', title='FCF흑자연수', morethan=None, value=None, is_boolean=False),
     FilterOption(key='rank_last_year_gpa', title='GPA순위', morethan=None, value=None, is_boolean=False),
     FilterOption(key='agg_rank', title='시총순위', morethan=None, value=None, is_boolean=False),
+    FilterOption(key='rank_beta', title='저베타순위', morethan=None, value=None, is_boolean=False),
+    FilterOption(key='is_closing_month_march', title='3월결산(참)', morethan=None, value=None, is_boolean=True),
     FilterOption(key='is_five_years_record_low', title='5년최저PBR(참)', morethan=None, value=None, is_boolean=True),
     FilterOption(key='has_consensus', title='컨센서스있음(참)', morethan=None, value=None, is_boolean=True),
     FilterOption(key='is_positive_consensus_roe', title='컨센서스>fROE(참)', morethan=None, value=None, is_boolean=True),
@@ -216,6 +236,18 @@ class Stock(UserDict):
         return self.get('dividend_rate', 0)
 
     @property
+    def beta(self) -> float:
+        return self.get('beta', 0)
+
+    @property
+    def foreigner_weight(self) -> float:
+        return self.get('foreigner_weight', 0)
+
+    @property
+    def floating_rate(self) -> float:
+        return self.get('floating_rate', 0)
+
+    @property
     def has_note(self) -> bool:
         return len(self.get('note', '')) > 0
 
@@ -339,8 +371,40 @@ class Stock(UserDict):
         return self.calc_future_bps(FUTURE)
 
     @property
-    def other_year_stat(self):
-        return zip(self.year_stat('BPSs'), self.year_stat('DEPTs'), self.year_stat('CAPEXs'))
+    def BPSs(self):
+        return self.year_stat('BPSs')
+
+    @property
+    def DEPTs(self):
+        return self.year_stat('DEPTs')
+
+    @property
+    def CFOs(self):
+        if self.get('CFOs') and type(self.get('CFOs')[0]) is int:
+            return self.year_stat('CFOs')
+        return self.get('CFOs', [(0, 0)])
+
+    @property
+    def CFIs(self):
+        if self.get('CFIs') and type(self.get('CFIs')[0]) is int:
+            return self.year_stat('CFIs')
+        return self.get('CFIs', [(0, 0)])
+
+    @property
+    def CFFs(self):
+        if self.get('CFFs') and type(self.get('CFFs')[0]) is int:
+            return self.year_stat('CFFs')
+        return self.get('CFFs', [(0, 0)])
+
+    @property
+    def FCFs(self):
+        if self.get('FCFs') and type(self.get('FCFs')[0]) is int:
+            return self.year_stat('FCFs')
+        return self.get('FCFs', [(0, 0)])
+
+    @property
+    def FCF_surplus_years(self):
+        return len([v for v in self.year_stat('FCFs', exclude_future=True) if v[1] > 0])
 
     @property
     def is_five_years_record_low(self):
@@ -356,7 +420,10 @@ class Stock(UserDict):
 
     @property
     def mean_consensus_roe(self):
-        return mean([pair[1] for pair in self.consensus_roes if pair[1]])
+        try:
+            return mean([pair[1] for pair in self.consensus_roes if pair[1]])
+        except StatisticsError:
+            return 0
 
     @property
     def is_positive_consensus_roe(self):
@@ -375,6 +442,45 @@ class Stock(UserDict):
     @property
     def rank_pbr(self):
         return self.get('rank_pbr')
+
+    @property
+    def is_closing_month_march(self):
+        return self.get('closing_month', 0) == 3
+
+    @property
+    def current_assets(self):
+        return self.get('current_assets', [])
+
+    @property
+    def current_liability(self):
+        return self.get('current_liability', [])
+
+    @property
+    def total_liability(self):
+        return self.get('total_liability', [])
+
+    @property
+    def current_ratio(self):
+        return [(c[0][0], (c[0][1] / c[1][1] if c[1][1] != 0 else 0) * 100) for c in zip(self.current_assets, self.current_liability)]
+
+    @property
+    def current_ratio_last_year(self):
+        if not self.current_ratio:
+            return 0
+        last_year = [c[1] for c in self.current_ratio if c[0] == LAST_YEAR]
+        return last_year[0] if last_year else 0
+
+    @property
+    def NCAV(self):
+        asset = [c[1] for c in self.current_assets if c[0] == LAST_YEAR]
+        liability = [c[1] for c in self.total_liability if c[0] == LAST_YEAR]
+        if not asset or not liability: 
+            return 0
+        return asset[0] - liability[0]
+
+    @property
+    def NCAV_ratio(self):
+        return self.NCAV / self.get('agg_value', 1) * 100
 
     def calc_gpa(self, gp):
         if not gp[1]:
@@ -403,8 +509,80 @@ class Stock(UserDict):
         return v[0]
 
     @property
+    def last_year_pcr(self):
+        v = [pcr[1] for pcr in self.get('PCRs', []) if pcr[0] == LAST_YEAR]
+        if not v or not v[0]:
+            return 0
+        return v[0]
+
+    @property
+    def last_year_psr(self):
+        v = [psr[1] for psr in self.get('PSRs', []) if psr[0] == LAST_YEAR]
+        if not v or not v[0]:
+            return 0
+        return v[0]
+
+    @property
     def agg_rank(self):
         return self.get('agg_rank')
+
+    @property
+    def use_fnguide(self):
+        return self.get('use_fnguide', False)
+
+    @property
+    def month1(self):
+        return self.get('month1', 0)
+    
+    @property
+    def month3(self):
+        return self.get('month3', 0)
+
+    @property
+    def month6(self):
+        return self.get('month6', 0)
+
+    @property
+    def month12(self):
+        return self.get('month12', 0)
+
+    @property
+    def relative_earning_rate(self):
+        return self.get('relative_earning_rate', -100)
+
+    @property
+    def sales_cost_ratio(self):
+        return [(s[0], c[1] / s[1] * 100) for c, s in zip(self.get('sales_cost', []), self.get('sales', []))]
+
+    @property
+    def SGA_ratio(self):
+        return [(s[0], c[1] / s[1] * 100) for c, s in zip(self.get('SGAs', []), self.get('sales', []))]
+
+    @property
+    def mean_ROIC(self):
+        values = [v[1] for v in self.get('ROICs', []) if v[1] > 0]
+        return mean(values) if values else 0
+
+    @property
+    def last_year_fcf(self):
+        fcf = [fcf[1] for fcf in self.FCFs if fcf[0] == LAST_YEAR]
+        return fcf[0] if fcf else 0
+
+    @property
+    def last_year_pfr(self):
+        fcf = self.last_year_fcf
+        if not fcf:
+            return 0
+        return self.get('agg_value', 1) / fcf
+
+    def value_by_year(self, key, year):
+        return first_or_none([v[1]for v in attr_or_key_getter(key, self, []) if v[0] == year])
+
+    def total_asset_turnover_by(self, year):
+        return first_or_none([v[1]for v in self.get('total_asset_turnover', []) if v[0] == year])
+
+    def net_working_capital_by(self, year):
+        return first_or_none([v[1]for v in self.get('net_working_capital', []) if v[0] == year])
         
     def expected_rate_by_price(self, price: int) -> float:
         return self.calc_expected_rate(self.calc_future_bps, FUTURE, price=price)
@@ -435,7 +613,10 @@ class Stock(UserDict):
     def calc_expected_rate(self, calc_bps, future: int, price: int=None):
         if not price:
             price = self.current_price
-        return ((calc_bps(future) / price) ** (1.0 / future) - 1) * 100
+        future_bps = calc_bps(future)
+        if future_bps < 0:
+            return 0
+        return ((future_bps / price) ** (1.0 / future) - 1) * 100
 
     def ten_year_prices(self) -> List[Tuple[int, float]]:
         price = self.get('my_price', 0)
@@ -459,10 +640,13 @@ class Stock(UserDict):
         year_profit = [p[1] for p in NPs if p[0] == year]
         if len(year_profit) > 0 and year_profit[0] > 0:
             profitable = 1
-        CFOs = self.year_stat('CFOs')
-        year_cfo = [c[1] for c in CFOs if c[0] == year]
-        if len(year_cfo) > 0 and year_cfo[0] > 0:
-            cfo = 1
+        CFOs = self.CFOs
+        if len(CFOs) > 0:
+            if type(CFOs[0]) is int:
+                CFOs = self.year_stat('CFOs')
+            year_cfo = [c[1] for c in CFOs if c[0] == year]
+            if len(year_cfo) > 0 and year_cfo[0] > 0:
+                cfo = 1
         
         return FScore(total_issued_stock=total_issued_stock, profitable=profitable, cfo=cfo)
 
@@ -482,35 +666,6 @@ class Stock(UserDict):
             return [(year(idx), value) for idx, value in enumerate(stats) 
                 if not exclude_future or year(idx) <= LAST_YEAR]
 
-    def save_record(self):
-        starred = self.get('starred', False)
-        owned = self.get('owned', False)
-        today = datetime.today()
-        today = today.replace(hour=0, minute=0, second=0, microsecond=0)
-        if not starred and not owned:
-            return
-        record = {
-            'date': today,
-            'buy': 0,
-            'sell': 0,
-            'bps': self.get('bps', 0),
-            'current_price': self.current_price,
-            'future_roe': self.future_roe,
-            'roe': self.get('roe', 0),
-            'pbr': self.get('pbr', 0),
-            'expected_rate': self.expected_rate,
-        }
-        records = self.get('records', [])
-        print('records', records)
-        if len(records) > 0 and records[-1]['date'] == today:
-           records[-1] = record
-        else:
-           records.append(record)
-        save_stock({
-            'code': self.get('code'),
-            'records': records,
-        })
-
     def __str__(self) -> str:
         return '{} : {}'.format(self['title'], self['code'])
 
@@ -524,34 +679,47 @@ def make_filter_option_func(filter_option):
     return filter_option_func
 
 
-def update_ranks():
-    dicts = db.stocks.find()
-    dicts = sorted([Stock(s) for s in dicts], key=partial(attr_or_key_getter, 'last_year_gpa'), reverse=True)
-    for idx, stock in enumerate(dicts):
-        stock['rank_last_year_gpa'] = idx + 1
+def update_rank_by(stocks: List[Stock], key: str, rank_key: str, reverse: bool):
+    countable = [s for s in stocks if attr_or_key_getter(key, s, default_value=None) and attr_or_key_getter(key, s, default_value=None) > 0]
+    for idx, stock in enumerate(sorted(countable, key=partial(attr_or_key_getter, key), reverse=reverse)):
+        stock[rank_key] = idx + 1
         save_stock(stock)
-    dicts = sorted([Stock(s) for s in dicts], key=partial(attr_or_key_getter, 'agg_value'), reverse=True)
-    for idx, stock in enumerate(dicts):
-        stock['agg_rank'] = idx + 1
+    uncountable = [s for s in stocks if not attr_or_key_getter(key, s, default_value=None) or attr_or_key_getter(key, s, default_value=None) < 0]
+    for stock in uncountable:
+        stock[rank_key] = len(stocks)
         save_stock(stock)
-    dicts = sorted([Stock(s) for s in dicts], key=partial(attr_or_key_getter, 'pbr'), reverse=False)
-    for idx, stock in enumerate(dicts):
-        stock['rank_pbr'] = idx + 1
-        save_stock(stock)
-    dicts = sorted([Stock(s) for s in dicts], key=partial(attr_or_key_getter, 'per'), reverse=False)
-    for idx, stock in enumerate(dicts):
-        stock['rank_per'] = idx + 1
-        save_stock(stock)
-    dicts = sorted([Stock(s) for s in dicts], key=partial(attr_or_key_getter, 'dividend_rate'), reverse=True)
-    for idx, stock in enumerate(dicts):
-        stock['rank_dividend'] = idx + 1
-        save_stock(stock)
+    
 
+def update_ranks():
+    stocks = [Stock(s) for s in db.stocks.find()]
+    update_rank_by(stocks, 'last_year_gpa', 'rank_last_year_gpa', reverse=True)
+    update_rank_by(stocks, 'agg_value', 'agg_rank', reverse=True)
+    update_rank_by(stocks, 'pbr', 'rank_pbr', reverse=False)
+    update_rank_by(stocks, 'per', 'rank_per', reverse=False)
+    update_rank_by(stocks, 'dividend_rate', 'rank_dividend', reverse=True)
+    update_rank_by(stocks, 'beta', 'rank_beta', reverse=False)
+    update_rank_by(stocks, 'floating_rate', 'rank_floating_rate', reverse=True)
+    update_rank_by(stocks, 'foreigner_weight', 'rank_foreigner_weight', reverse=True)
+    update_rank_by(stocks, 'month1', 'rank_month1', reverse=True)
+    update_rank_by(stocks, 'month3', 'rank_month3', reverse=True)
+    update_rank_by(stocks, 'month6', 'rank_month3', reverse=True)
+    update_rank_by(stocks, 'month12', 'rank_month3', reverse=True)
+    update_rank_by(stocks, 'relative_earning_rate', 'rank_relative_earning_rate', reverse=True)
+    update_rank_by(stocks, 'NCAV_ratio', 'rank_ncav', reverse=True)
+    update_rank_by(stocks, 'mean_ROIC', 'rank_roic', reverse=True)
+    update_rank_by(stocks, 'current_ratio_last_year', 'rank_current_ratio', reverse=True)
+    update_rank_by(stocks, 'last_year_pcr', 'rank_last_year_pcr', reverse=False)
+    update_rank_by(stocks, 'last_year_psr', 'rank_last_year_psr', reverse=False)
+    update_rank_by(stocks, 'last_year_pfr', 'rank_last_year_pfr', reverse=False)
 
 def all_stocks(order_by='title', ordering='asc', find=None, filter_by_expected_rate=True, filter_bad=True, filter_options=[], rank_options=[]) -> List[Stock]:
     stocks = [Stock(dict) for dict in (db.stocks.find(find) if find else db.stocks.find())]
 
     filter_funcs = []
+
+    if filter_options or rank_options:
+        filter_by_expected_rate = False
+        filter_bad = False
 
     if filter_by_expected_rate:
         filter_by_expected_rate_func = lambda s: (s.expected_rate > 0 and filter_bad) or (s.expected_rate < 0 and not filter_bad)
@@ -641,7 +809,7 @@ def etf_by_code(code) -> ETF:
     return ETF(db.etf.find_one({'code': code}))
 
 
-def all_etf(order_by='title', ordering='asc'):
-    ETFs = [ETF(dict) for dict in db.etf.find()]
+def all_etf(order_by='title', ordering='asc', etf_type='domestic'):
+    ETFs = [ETF(dict) for dict in db.etf.find({'type': etf_type})]
     ETFs = sorted(ETFs, key=partial(attr_or_key_getter, order_by), reverse=(ordering != 'asc'))
     return ETFs
